@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Documentos de entrada y resultados generados: nunca se versionan.
+# Este repo es solo el pipeline; los documentos son de cada usuario.
+output/
+inventario.csv
+*.pdf
+*.docx
+*.pptx
+marker_batch.log
+marker_test/
+pymupdf_test/
+
+.DS_Store
