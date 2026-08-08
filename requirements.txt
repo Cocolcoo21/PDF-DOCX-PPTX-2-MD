@@ -1,3 +1,5 @@
 pymupdf4llm
 marker-pdf
 python-pptx
+anthropic
+python-dotenv

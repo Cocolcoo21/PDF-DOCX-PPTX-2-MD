@@ -2,10 +2,15 @@
 __pycache__/
 *.pyc
 
+# Nunca versionar la API key.
+.env
+missing_captions.txt
+
 # Documentos de entrada y resultados generados: nunca se versionan.
 # Este repo es solo el pipeline; los documentos son de cada usuario.
 output/
 inventario.csv
+inventario_final.csv
 *.pdf
 *.docx
 *.pptx

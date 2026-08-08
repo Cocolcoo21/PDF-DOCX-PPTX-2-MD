@@ -35,8 +35,9 @@ brew install llama.cpp
 brew install pandoc
 
 # Aplicar SIEMPRE después de instalar/actualizar marker-pdf, antes de usar
-# --mode balanced (ver detalle del bug en patches/fix_surya_grammar.py):
+# --mode balanced (ver detalle de los bugs en patches/*.py):
 python patches/fix_surya_grammar.py
+python patches/fix_marker_empty_image.py
 ```
 
 ## Fase 0 — Entorno
@@ -86,24 +87,32 @@ python convertir_pptx.py archivo.pptx ...
 ```
 
 Todo queda en `output/<misma estructura de carpetas>/<documento>/`, con
-imágenes en `assets/` (o `media/` para docx, por defecto de pandoc) y
-enlaces relativos al propio `.md` — la carpeta de cada documento es
-autocontenida y portable.
+imágenes en `assets/` (o `media/` para docx, por defecto de pandoc; Marker
+las deja planas en la misma carpeta que el `.md`) y enlaces relativos al
+propio `.md` — la carpeta de cada documento es autocontenida y portable.
 
 `convertir_marker.sh` escribe además `marker_batch.log` con timestamps,
-duración y éxito/error por documento.
+duración y éxito/error por documento, y aplana automáticamente la
+subcarpeta redundante que crea `marker_single` (ver Problemas conocidos).
+
+Si un documento falla a mitad de lote (ver Problemas conocidos — el bug de
+imagen vacía es el caso típico), el resto del lote sigue: `convertir_marker.sh`
+no se detiene en un `ERROR`, solo lo deja registrado en el log. Reintentar
+ese documento suelto después con el mismo comando.
 
 ## Fase 4 — Control de calidad y cierre
 
-Antes de dar por cerrado el lote, validar:
+```bash
+python qc_inventario.py
+```
 
-- Ningún `.md` vacío.
-- Todos los enlaces de imagen resuelven a archivos existentes dentro de la
-  misma carpeta de documento.
-- Conteo de encabezados razonable por documento (un `.md` con 0 encabezados
-  en un documento largo es señal de que algo salió mal).
-- Revisar el log de Marker por warnings de `Table OCR failed` o `Overflow in
-  columns/rows` — indican tablas que pueden necesitar revisión manual.
+Recorre `output/`, valida cada `.md` (vacío, sin encabezados, enlaces de
+imagen rotos) y genera `inventario_final.csv` con el resultado por
+documento — cruza duración desde `marker_batch.log` si existe. Un `.md` con
+0 encabezados en un documento largo, o con imágenes referenciadas que no
+existen, es señal de que ese documento necesita revisión manual (no
+necesariamente un error del pipeline: puede ser que el docx original no use
+estilos de encabezado, por ejemplo).
 
 ## Problemas conocidos
 
@@ -116,6 +125,80 @@ Antes de dar por cerrado el lote, validar:
 - **surya-ocr 0.22.x** (dependencia de marker-pdf, modo `balanced`): bug de
   gramática GBNF con `\d` que rompe el layout inference en Mac/CPU/MPS. Ver
   `patches/fix_surya_grammar.py`.
+- **marker-pdf 2.0.0**: si una caja de layout se recorta a área cero (bbox
+  degenerado), Pillow revienta con `ValueError: cannot write empty image as
+  JPEG` y aborta la conversión COMPLETA del documento, aunque llevara 20+
+  minutos procesado — sin workaround por CLI. Ver
+  `patches/fix_marker_empty_image.py` (salta esa imagen puntual con un
+  aviso en vez de abortar). Sin issue/fix upstream conocido a la fecha.
+- **`marker_single` anida su propio output**: crea `--output_dir/<nombre
+  original del archivo>/<archivo>.md` en vez de `--output_dir/<archivo>.md`
+  directamente — un nivel de más, y con el nombre *sin sanear* (con
+  espacios/paréntesis) aunque `--output_dir` sí esté saneado. `convertir_marker.sh`
+  ya lo aplana automáticamente después de cada conversión exitosa.
 - **Multicolumna**: incluso con Marker, revisar manualmente documentos con
   layouts muy irregulares (outlines multinivel, tablas anidadas) — es el
   punto débil común a ambas herramientas.
+
+## Procesamiento de imágenes: recomendaciones
+
+Las imágenes se extraen como archivos separados con enlaces relativos
+(`assets/imagen.png`), nunca embebidas en base64 dentro del `.md`. Motivos,
+confirmados contra prácticas actuales de RAG/pipelines multimodales:
+
+- **Base64 inline infla el archivo ~33%** y vuelve los diffs de git
+  ilegibles/gigantes — malo para versionado y para indexar en un pipeline de
+  RAG (los chunks de texto quedan contaminados con blobs enormes).
+- **El costo en tokens de un modelo de visión (incluido Claude) depende de
+  la RESOLUCIÓN de la imagen, no de si se manda como base64 o como
+  archivo/URL.** Claude tokeniza en parches de 28×28px: una imagen de
+  1000×1000px cuesta ~1,334 tokens sin importar el encoding. Es decir,
+  convertir a base64 no ahorra ni cuesta tokens — es puramente un formato de
+  transporte.
+- Por lo tanto, **el archivo separado es estrictamente mejor para
+  almacenamiento/versionado**, y la conversión a base64 (si hace falta,
+  porque cierta API solo acepta eso) es una responsabilidad del consumidor
+  en el momento de la llamada — no algo que decidir en el momento de la
+  conversión PDF→MD.
+
+### Captioning de imágenes (implementado)
+
+Para que el contenido de diagramas/mapas/tablas-como-imagen sea *buscable
+por texto* (un RAG de solo texto no puede "ver" una imagen), se genera una
+vez, en un paso posterior a la conversión, una descripción corta de cada
+imagen vía un modelo con visión, y se inserta como texto justo debajo de la
+imagen en el `.md`:
+
+```bash
+python caption_imagenes.py --limit 3   # smoke test primero
+python caption_imagenes.py             # todo output/
+python audit_dedup_captions.py --audit # verificar que cuadre 1 caption/imagen
+```
+
+- Usa la API de Claude en paralelo (`MAX_WORKERS = 10` en el script) —
+  rápido (minutos, no horas) y barato (~$1-1.50 para varios cientos de
+  imágenes con Sonnet). Requiere `ANTHROPIC_API_KEY`.
+- **Alternativa 100% local** (sin costo, sin que las imágenes salgan de la
+  máquina — preferible si los documentos son sensibles): un modelo de
+  visión pequeño vía `llama.cpp`/GGUF (ya instalado si se usó Marker). En
+  2026, buenas opciones para Apple Silicon: `Qwen3-VL-4B` (mejor
+  calidad/tamaño) o `MiniCPM-V 4.6` (0.8B, el más rápido). No incluido como
+  script en este repo todavía — reusar el mismo patrón de
+  `llama-server` que usa Marker (ver `patches/`), cambiando el modelo GGUF.
+- **Cuidado con la concurrencia**: si varios hilos escriben el mismo `.md`
+  en paralelo sin lock, hay *lost updates* (captions que desaparecen sin
+  error visible). `caption_imagenes.py` ya usa un lock por archivo — no
+  quitarlo si se modifica el script.
+- Si el conteo final de captions no coincide exactamente con el de
+  imágenes, correr `audit_dedup_captions.py --dedup` (duplicados) y
+  `--audit` (faltantes). Una causa posible de faltantes que **no** es un
+  bug de este script: Marker a veces duplica una página completa, dejando
+  el mismo nombre de imagen referenciado dos veces en el mismo documento —
+  la segunda aparición es contenido redundante, no información perdida.
+
+Sources:
+- [markitdown issue #2049 — extraer imágenes como archivos separados](https://github.com/microsoft/markitdown/issues/2049)
+- [Building a Multimodal LLM Application with PyMuPDF4LLM](https://artifex.com/blog/building-a-multimodal-llm-application-with-pymupdf4llm)
+- [Claude Vision docs — cálculo de tokens por imagen](https://platform.claude.com/docs/en/build-with-claude/vision)
+- [Multimodal RAG: Retrieving from Images, PDFs, and Tables](https://tensoria.fr/en/blog/multimodal-rag-images-pdfs-tables)
+- [Multimodality RAG (MRAG)](https://medium.com/@shivamarora1/multimodality-rag-mrag-extract-store-and-retrieve-visual-data-diagrams-images-from-document-dd47b1892dc8)
