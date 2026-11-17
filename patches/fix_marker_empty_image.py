@@ -29,7 +29,10 @@ except ImportError:
     print("marker-pdf no está instalado en este entorno (pip install marker-pdf).", file=sys.stderr)
     sys.exit(1)
 
-output_path = Path(marker.__file__).parent / "output.py"
+# marker es un namespace package en algunos entornos (p. ej. Python 3.14):
+# ahí __file__ es None y hay que usar __path__.
+pkg_dir = Path(marker.__file__).parent if marker.__file__ else Path(list(marker.__path__)[0])
+output_path = pkg_dir / "output.py"
 if not output_path.exists():
     print(f"No se encontró {output_path}; puede que la estructura del paquete haya cambiado.", file=sys.stderr)
     sys.exit(1)

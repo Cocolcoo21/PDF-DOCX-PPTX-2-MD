@@ -19,3 +19,6 @@ marker_test/
 pymupdf_test/
 
 .DS_Store
+
+# Salidas de corridas sueltas
+*.out
